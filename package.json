@@ -1,0 +1,14 @@
+{
+  "name": "vue2-repro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Vue 2.7 Options API project for openidea Vue2 template navigation issue",
+  "scripts": {
+    "probe:template": "node tsserver-probe.js . node_modules \"@click=\\\"handler\\\"\" handler",
+    "probe:this": "node tsserver-probe.js . node_modules this.myConsole myConsole",
+    "probe:plugin": "node plugin-check.js . node_modules"
+  },
+  "dependencies": {
+    "vue": "2.7.16"
+  }
+}
