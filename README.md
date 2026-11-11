@@ -1,55 +1,56 @@
 # OpenIDEA Vue 2 template navigation repro
 
 Minimal Vue 2.7 project for [l0ng-ai/openidea#1164](https://github.com/l0ng-ai/openidea/issues/1164)
-and [#1163](https://github.com/l0ng-ai/openidea/issues/1163): Go to Declaration on a template
-handler (or on `this.xxx` inside `<script>`) does not work for Options API components.
+and [#1163](https://github.com/l0ng-ai/openidea/issues/1163).
 
-Related report: [#1164](https://github.com/l0ng-ai/openidea/issues/1164)
+## 结论 / TL;DR
 
----
+- `jsconfig.json` 的 `compilerOptions` 加上 **`"strictFunctionTypes": true`** 后：
+  - `this.xxx` 有类型（不再是 `any`）
+  - 模板表达式（`{{ }}`、`v-if`、`v-show`）能跳转
+  - 原生元素事件、局部组件事件、全局组件事件**都能跳转**
+- 因此本最小项目**无法复现**真实项目里「组件事件不跳」的现象（见下方“未复现”）。
 
-## 现象 / Symptom
+With `"strictFunctionTypes": true` in `jsconfig.json`, everything below navigates:
+`this.xxx`, template expressions, native events, local component events, and global
+component events. This repro therefore does **not** reproduce the real-project issue.
 
-- `import Vue from 'vue'` 里的 `vue`：**能**跳转到 `node_modules/vue/types/vue.d.ts`
-- 模板 `@click="handler"` 里的 `handler`：**不能**跳转，`definition` 返回 `[]`
-- `<script>` 里 `this.myConsole()` 的 `myConsole`：**也不能**跳转，hover 显示 `any`
+## 项目结构 / Layout
 
-`import Vue from 'vue'` navigates to `node_modules/vue/types/vue.d.ts`; the template
-`handler` and `this.myConsole()` both resolve to `any`, and `definition` returns `[]`.
-
-## 环境 / Environment
-
-- OpenIDEA 0.1.35, Windows 11 x64
-- Vue 2.7.16, plain JavaScript, Options API, `jsconfig.json`
-
-```json
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "target": "ES6",
-    "module": "commonjs",
-    "moduleResolution": "node",
-    "allowJs": true,
-    "checkJs": true,
-    "allowSyntheticDefaultImports": true,
-    "jsx": "preserve"
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"],
-  "vueCompilerOptions": { "target": 2.7 }
-}
+```
+src/
+├─ App.vue                  # 4 个用例
+├─ components/ChildButton.vue
+└─ global-components.d.ts   # 可选：声明 global-button 为全局组件
+jsconfig.json               # strictFunctionTypes: true
+tsserver-probe.js           # 直接向 tsserver 查询 definition / quickinfo
+plugin-check.js             # 查询 _vue:projectInfo（看 plugin 版本 / vue shim）
 ```
 
-`module` 是 `commonjs`（不是 `esnext`）；补上 `moduleResolution: "node"` 和
-`vueCompilerOptions.target: 2.7` 之后现象不变。
+## 四个用例 / Cases
 
-## 文件 / Files
+| 用例 | 模板 | 期望 | 实测（strictFunctionTypes: true） |
+| --- | --- | --- | --- |
+| A | `<button @click="handler">` | 跳 `methods.handler` | ✅ |
+| B | `<child-button @my-event="handler">`（局部注册） | 跳 `methods.handler` | ✅ |
+| C | `<global-button @my-event="handler">`（`globalTypes` 声明） | 跳 `methods.handler` | ✅ |
+| D | `<span>{{ count }}</span>` | 跳 `data.count` | ✅ |
 
-- `src/App.vue` — the minimal Options API component
-- `tsserver-probe.js` — starts `tsserver` with `@vue/typescript-plugin` and asks for
-  `definition` / `quickinfo` at a position
-- `plugin-check.js` — asks the plugin `_vue:projectInfo` which files it put into the
-  TS program (this is how we spotted the Vue 3.4 shim)
+> C 用例在**去掉** `vueCompilerOptions.globalTypes` 时也能跳，所以“未声明的全局组件”同样不是原因。
+
+## 未复现 / Not reproduced
+
+真实项目（Vue 2.7 + Ant Design Vue）里：
+
+- `<a-button @click="toggleLeftGis">` → `definition: []`，`quickinfo: any`
+- `<left-gis @query-results="openTableList">`（运行时全局注册）→ 同样为空
+
+同一文件里模板表达式（`v-if="webConfig.setting?.showGis"`）能跳，`this.$refs` 有类型。
+所以不是 `strictFunctionTypes` 的问题，疑似与组件库的 web-types / 全局组件解析有关。
+
+In the real project, events on Ant Design components (`a-button`) and on runtime
+globally-registered components (`left-gis`) still return an empty definition, while
+template expressions in the same file navigate fine.
 
 ## 运行 / Run
 
@@ -57,32 +58,24 @@ Related report: [#1164](https://github.com/l0ng-ai/openidea/issues/1164)
 npm install
 
 # TS_LIB = a TypeScript lib directory that contains tsserver.js
-set TS_LIB=C:\path\to\node_modules\typescript\lib       # cmd
-$env:TS_LIB = "C:\path\to\node_modules\typescript\lib"   # PowerShell
+set TS_LIB=C:\path\to\node_modules\typescript\lib
+$env:TS_LIB = "C:\path\to\node_modules\typescript\lib"
 
 node plugin-check.js . node_modules
 node tsserver-probe.js . node_modules "this.myConsole" myConsole
 node tsserver-probe.js . node_modules "@click=\"handler\"" handler
+node tsserver-probe.js . node_modules "@my-event=\"handler\"" handler
+node tsserver-probe.js . node_modules "{{ count }}" count
 ```
 
-## 发现 / Findings
+`tsserver-probe.js` 可选第 6 个参数指定文件：`node tsserver-probe.js <proj> <probe> <line-needle> <word> <file.vue>`。
 
-1. `plugin-check.js` 用内置 plugin **3.3.14** 时，program 里出现
-   `@vue/language-core/types/vue-3.4-shims.d.ts` —— 也就是说这个 plugin 把项目当成
-   **Vue 3.4** 处理，Vue 2 的组件实例类型因此没有生成，`this` 退化为 `any`。
-2. 换成干净的 **3.0.11** 三件套（`@vue/language-server` / `@vue/typescript-plugin` /
-   `@vue/language-core` 全 3.0.11）后，不再加载 3.4 shim；但通过 tsserver 直接查询时
-   `this` 仍为 `any`（直接查询没有经过 Vue Language Server 的虚拟文件，存在局限）。
-3. `@vue/language-server` 内置版本是 3.3.14，而 Vue Language Tools 从 **3.1** 起
-   移除了 Vue 2 支持（[vuejs/language-tools#5455](https://github.com/vuejs/language-tools/discussions/5455)）。
+## 如何验证 UI 行为
 
-## 期望 / Expected
-
-Upstream should confirm which `@vue/typescript-plugin` version the #1163 test used.
-If the bundled 3.3.14 really resolves Vue 2 templates, the project here should reproduce it.
+1. 用 OpenIDEA 打开本目录
+2. 打开 `src/App.vue`
+3. 分别在 A/B/C/D 四处按 `Ctrl+B`，应都能跳到对应定义
 
 ---
 
-I really like OpenIDEA — it is fast, and the IntelliJ-style keymap feels right at home.
-This Vue 2 issue is the single biggest blocker keeping me from using it for our main
-projects, which are all Vue 2 + Options API.
+I really like OpenIDEA — it is fast and the IntelliJ-style keymap feels right at home.

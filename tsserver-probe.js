@@ -18,7 +18,7 @@ if (!tsLib) {
   process.exit(2);
 }
 const tsserver = path.join(tsLib, 'tsserver.js');
-const file = path.join(proj, 'src', 'App.vue');
+const file = process.argv[6] || path.join(proj, 'src', 'App.vue');
 const text = fs.readFileSync(file, 'utf8');
 const lines = text.split('\n');
 const lineIdx = lines.findIndex((l) => l.includes(needleLine));
