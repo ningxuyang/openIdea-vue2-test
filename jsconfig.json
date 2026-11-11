@@ -6,14 +6,10 @@
     },
     "target": "ES6",
     "module": "commonjs",
-    "moduleResolution": "node",
-    "allowJs": true,
-    "checkJs": true,
     "allowSyntheticDefaultImports": true,
     "jsx": "preserve",
     "strictFunctionTypes": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"],
-  "vueCompilerOptions": { "target": 2.7 }
+  "exclude": ["node_modules", "dist"]
 }
