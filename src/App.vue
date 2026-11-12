@@ -1,29 +1,20 @@
 <template>
   <div>
-    <button @click="handler">native click</button>
-
-    <!-- import 没写 .vue 后缀 -->
-    <child-button @my-event="handler" />
-
-    <span>{{ count }}</span>
+    <child-button ref="child" @my-event="handler" />
+    <span>{{ $refs.child }}</span>
   </div>
 </template>
 
 <script>
-// 故意不写 .vue 后缀
-import ChildButton from './components/ChildButton'
+import ChildButton from './components/ChildButton.vue'
 
 export default {
   name: 'App',
   components: { ChildButton },
-  data() {
-    return { count: 0 }
-  },
   methods: {
-    myConsole() { console.log('inner') },
     handler() {
-      this.myConsole()
-      console.log('clicked')
+      this.$refs.child
+      this.$refs.child.focusIt()
     }
   }
 }

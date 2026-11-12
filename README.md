@@ -1,92 +1,295 @@
-# OpenIDEA Vue 2 template navigation repro
+# OpenIDEA: `this.$refs.x` cannot be navigated (Vue 2.7 Options API)
 
-Minimal Vue 2.7 project for [l0ng-ai/openidea#1164](https://github.com/l0ng-ai/openidea/issues/1164).
+Vue 2.7 Options API 项目里，`this.$refs.child` 只能跳到 `vue.d.ts` 的索引签名，
+`this.$refs.child.focusIt()` 完全没有跳转。WebStorm 可以精确跳转。
 
-## 根因 / Root cause
+In a Vue 2.7 Options API project, `this.$refs.child` only jumps to the index
+signature in `vue.d.ts`, and `this.$refs.child.focusIt()` has no navigation at
+all. WebStorm navigates both precisely.
 
-**组件 import 省略了 `.vue` 后缀**时，TypeScript / Volar 解析不到组件类型，组件变成 `any`；它一旦注册进 `components`，整个组件实例类型（`this`）就降级为 `any`，于是：
+Target issue: `l0ng-ai/openidea` — Vue 2.7 Options API `$refs` navigation.
 
-- 模板里所有 `@event="method"`（原生元素和组件都算）**都不跳转**
-- 模板表达式（`{{ count }}`、`v-if` 等）**仍然正常**
+---
 
-When a component is imported **without the `.vue` extension**, TypeScript/Volar cannot
-resolve it, the component becomes `any`, and registering it under `components` degrades
-the whole component instance type to `any`. Template event handlers then stop navigating,
-while template expressions keep working.
+## 1. 复现 / Reproduce
 
-## 复现 / Reproduce
+`src/App.vue`:
 
-`src/App.vue` 里是**故意不写后缀**的 import：
+```vue
+<template>
+  <div>
+    <child-button ref="child" @my-event="handler" />
+    <span>{{ $refs.child }}</span>
+  </div>
+</template>
 
-```js
-import ChildButton from './components/ChildButton'   // 没有 .vue
+<script>
+import ChildButton from './components/ChildButton.vue'
+
+export default {
+  name: 'App',
+  components: { ChildButton },
+  methods: {
+    handler() {
+      this.$refs.child            // ① 期望跳到 ref="child"
+      this.$refs.child.focusIt()  // ② 期望跳到 ChildButton.vue 的 focusIt
+    }
+  }
+}
+</script>
+```
+
+`src/components/ChildButton.vue` 里定义了 `methods: { focusIt() {} }`。
+
+### 期望 / Expected
+
+| 光标位置 | 期望跳到 |
+| --- | --- |
+| `this.$refs.child` | 本文件 `<child-button ref="child">`（`ref="child"` 属性） |
+| `this.$refs.child.focusIt` | `src/components/ChildButton.vue` 的 `focusIt` |
+
+### 实际 / Actual
+
+```
+① this.$refs.child        → node_modules/vue/types/vue.d.ts:67  ($refs 索引签名)
+② this.$refs.child.focusIt → definition: []   (nothing to jump to)，类型是 any
+```
+
+## 2. 实测输出 / Measured output
+
+用 `tsserver-probe.js` 直接问 vtsls（绕开 UI，排除 IDE 渲染问题）：
+
+```powershell
+$env:TS_LIB = "<typescript>/lib"
+node tsserver-probe.js . node_modules "this.$refs.child" "\`$refs"
+node tsserver-probe.js . node_modules "this.$refs.child.focusIt" focusIt
+```
+
+```
+① definition: vue.d.ts:67 (offset 12-17)
+   quickinfo : (property) Vue<...>.$refs: {
+                 [key: string]: ComponentPublicInstance<...> | Element | Vue<...> | (...)[]
+               }
+
+② definition: []
+   quickinfo : any
+```
+
+## 3. 根因 / Root cause
+
+三层，缺一不可。
+
+### 3.1 Vue 2.7 的 `$refs` 本身就是索引签名
+
+`node_modules/vue/types/vue.d.ts:67`:
+
+```ts
+export interface Vue<Data, Props, Instance, Options, Emit> {
+  readonly $refs: {
+    [key: string]:
+      | NeverFallback<Instance, Vue>
+      | Vue
+      | Element
+      | (NeverFallback<Instance, Vue> | Vue | Element)[]
+      | undefined
+  }
+}
+```
+
+`child` 不是声明的成员，所以 `this.$refs.child` 是索引访问，只能指向索引签名本身；
+再往下的 `.focusIt` 在联合类型上不存在，所以 `any` + 空结果。
+
+Vue 官方对这件事的态度见 [vuejs/core#6197](https://github.com/vuejs/core/issues/6197)
+（closed）：`$refs` 就是宽类型，官方不打算让它更窄。
+
+### 3.2 TypeScript 的接口合并无法覆盖已有属性
+
+尝试用声明合并把精确类型补上（`src/refs-experiment.d.ts`，5 种写法都试过）：
+
+```ts
+import ChildButton from './components/ChildButton.vue'
+
+declare module 'vue/types/vue' {
+  interface Vue<
+    Data = Record<string, any>,
+    Props = Record<string, any>,
+    Instance = never,
+    Options = never,
+    Emit = (event: string, ...args: any[]) => Vue
+  > {
+    $refs: { child: ChildButton }
+  }
+}
+```
+
+实测（`node experiments/refs-dts-merge.js`）：
+
+```
+=== 0 baseline (no merge)
+  this.$refs.child        → definition: 1 target(s) → vue.d.ts:67
+  $refs type contains member "child"? NO (still the index signature)
+  this.$refs.child.focusIt → definition: [] (nothing to jump to)
+
+=== 1 vue/types/vue + full generics
+  this.$refs.child        → definition: 2 target(s) → refs-experiment.d.ts:11, vue.d.ts:67
+  $refs type contains member "child"? NO (still the index signature)
+  this.$refs.child.focusIt → definition: [] (nothing to jump to)
+
+=== 2 vue/types/vue + no generics        → 同上
+=== 3 module "vue" (re-export, wrong place) → 合并完全无效
+=== 4 index signature + member           → 同上
+```
+
+也就是说：**合并被接受了**（多了声明位置），但 `$refs` 的类型没变，
+`.focusIt` 依然是 `any`。`semanticDiagnostics` 也没有报错。
+
+纯 TypeScript 对照实验（与 Vue 完全无关，`experiments/tsexp/`）：
+
+```ts
+// types.d.ts
+interface Foo { bar: { [key: string]: number } }
+// merge.d.ts
+interface Foo { bar: { child: string } }
+// use.ts
+declare const f: Foo
+f.bar.child   // → any, definition: []
+```
+
+**结论：这是 TypeScript 接口合并的通用限制 —— 同名属性以先声明者的类型为准，
+后声明的类型既覆盖不了它，也不会合并成员。**
+
+### 3.3 `inferTemplateDollarRefs` 只覆盖模板
+
+`jsconfig.json` 里开启：
+
+```json
+"vueCompilerOptions": { "target": 2.7, "inferTemplateDollarRefs": true }
 ```
 
 实测：
 
-| 位置 | 结果 |
+| 位置 | 开启后 |
 | --- | --- |
-| `<child-button>` 的 quickinfo | `(property) "child-button": any` |
-| `<child-button @my-event="handler">` | `definition: []`，`any` |
-| 原生 `<button @click="handler">` | `definition: []`，`any` |
-| `<span>{{ count }}</span>` | ✅ 正常跳转 |
+| 模板里 `{{ $refs.child }}` | ✅ 精确：`$refs: { child: NonNullable<Vue3Instance<...>> \| null }` |
+| script 里 `this.$refs.child` | ❌ 仍是索引签名 |
 
-改成 `import ChildButton from './components/ChildButton.vue'` 后，以上全部恢复正常。
+源码依据：`@vue/language-core/lib/codegen/template/index.js:41` 只在模板代码生成时
+注入 `$refs`；Options API 的 `this` 来自 Vue 类型定义，不经过这里。
 
-## 修复 / Fix
+## 4. 为什么 WebStorm 能跳 / How WebStorm does it
 
-给组件 import 补上 `.vue`：
+WebStorm 不是"跳转时特判"，而是**把 `$refs` 的类型对象整个替换掉**。它有自己的
+JS 类型引擎（`JSTypeBaseImpl` + `replaceStandardProperty`），所以能覆盖声明。
 
-```js
-import ChildButton from './components/ChildButton.vue'
+挂载点：
+`vuejs/vuejs-backend/src/org/jetbrains/vuejs/model/VueInstanceOwner.kt:147`
+
+```kotlin
+replaceStandardProperty(INSTANCE_REFS_PROP, instanceOwner, ::buildRefsType, result)
 ```
 
-真实项目验证（`af-linepatrol-web/src/pages/PatrolMapNew/index.vue`）：
+实现：`vuejs/vuejs-backend/src/org/jetbrains/vuejs/types/VueRefsType.kt`（全文 88 行，
+核心 30 行，Apache 2.0）：
 
+```kotlin
+override fun substituteImpl(context: JSTypeSubstitutionContext): JSType {
+    val members: MutableMap<String, JSRecordType.TypeMember> = mutableMapOf()
+    (instanceOwner as? VueComponent)?.template?.safeVisitTags { tag ->
+        (findAttribute(tag, REF_ATTRIBUTE_NAME) as? VueRefAttribute)
+            ?.implicitElement
+            ?.let {
+                // For multiple elements with the same ref name, the last one is taken by Vue engine
+                members[it.name] = PropertySignatureImpl(it.name, it.jsType, false, true, it)
+            }
+    }
+    getDefaultVueComponentInstanceType(instanceOwner.source)
+        ?.asRecordType()
+        ?.findPropertySignature(INSTANCE_REFS_PROP)
+        ?.jsType
+        ?.asRecordType()
+        ?.findIndexer(JSRecordType.IndexSignatureKind.STRING)
+        ?.let { members[""] = it }   // 保留索引签名兜底
+    return JSSimpleRecordTypeImpl(source, members.values.toList())
+}
 ```
-- import XFormTable from '@vue2-client/.../XFormTable/XFormTable'
-+ import XFormTable from '@vue2-client/.../XFormTable/XFormTable.vue'
-```
 
-改完后：
+- 仓库：<https://github.com/JetBrains/intellij-plugins>
+- 路径：`vuejs/vuejs-backend/src/org/jetbrains/vuejs/types/VueRefsType.kt`
+- 挂载点：`vuejs/vuejs-backend/src/org/jetbrains/vuejs/model/VueInstanceOwner.kt` 第 147 行
+- 许可：Apache 2.0
 
-| 位置 | 结果 |
+因为替换的是**类型**，所以 `.focusIt`、补全、Find Usages、重命名全都自动生效 ——
+不是只修了跳转。
+
+## 5. 其他编辑器 / Other editors
+
+| 编辑器 | Vue 支持方式 | `$refs` 跳转 |
+| --- | --- | --- |
+| WebStorm | 自研 JS 类型引擎 | ✅ |
+| OpenIDEA | 转发 VLS + vtsls（`crates/ide-sdk/src/vue.rs`，10.6 KB） | ❌ |
+| Zed | 转发 `@vue/language-server` + `@vue/typescript-plugin`（`zed-extensions/vue/src/vue.rs`，9.8 KB，只做安装和 completion 映射） | ❌ |
+| VS Code | Volar 扩展 | ❌ |
+
+Zed 方面没有相关 issue（搜 `$refs` 无结果），但连模板变量跳转
+（`zed-extensions/vue#16`，`{{ test }}` 按 F12 无反应）至今仍 open。
+
+**这不是 OpenIDEA 独有，但也不是无解** —— WebStorm 证明了 IDE 层可以做。
+
+## 6. 已排除的方案 / Ruled out
+
+| 方案 | 结果 |
 | --- | --- |
-| `<left-gis @query-results="openTableList">` | ✅ 跳第 822 行 |
-| `<ol-map @wms-click="handleWmsClick">` | ✅ 跳第 748 行 |
-| `<a-button @click="toggleLeftGis">` | ✅ 跳第 1483 行 |
+| `jsconfig` 加 `inferTemplateDollarRefs` | 只对模板内 `$refs` 有效，`this.$refs` 无效 |
+| `declare module 'vue/types/vue'` 声明合并 | 合并被接受，类型不变（见第 3.2 节） |
+| 改 `@vue/language-core` | 类型来自 `vue.d.ts`，Volar 只在模板注入，改这里也没用 |
+| 给 Volar 提 issue | `$refs` 宽类型是 Vue 官方既定设计（core#6197） |
+| 写 OpenIDEA 插件 | 插件 `providers.definition` 只能返回 location，拿不到类型，做不到与类型系统一致 |
 
-## 说明 / Notes
-
-- 与 `@vue2-client` 无关：把这两个组件换成空壳组件也能复现/修复，变量只有 import 后缀。
-- `strictFunctionTypes: true` 仍然是 Vue 2.7 Options API `this` 推断的前提（见 #1164）。
-- 项目里其它同类 import（无 `.vue` 后缀）也会有同样问题，建议统一排查。
-
-## 文件 / Files
+## 7. 文件 / Files
 
 ```
 src/
-├─ App.vue                  # 复现用：import 不带 .vue
-└─ components/ChildButton.vue
-tsserver-probe.js           # 直接向 tsserver 查 definition / quickinfo
-diagnostics-check.js        # 查语法/语义错误
-compile-check.js            # 用 vue-template-compiler 检查 SFC
+├─ App.vue                       # 复现：this.$refs.child / .focusIt()
+├─ components/ChildButton.vue    # methods.focusIt()
+└─ global-components.d.ts        # 全局组件用例（Vue.component 注册）
+
+experiments/
+├─ refs-dts-merge.js             # 5 种声明合并写法的实测
+└─ tsexp/                        # 纯 TypeScript 反证（与 Vue 无关）
+
+jsconfig.json                    # strictFunctionTypes + inferTemplateDollarRefs
+tsserver-probe.js                # 直接问 tsserver：definition / quickinfo
+diagnostics-check.js             # syntactic / semantic diagnostics
+compile-check.js                 # vue-template-compiler 校验 SFC
 ```
 
-## 运行 / Run
+## 8. 运行 / Run
 
 ```bash
 npm install
 
-# TS_LIB = 含 tsserver.js 的 TypeScript lib 目录
-set TS_LIB=C:\path\to\node_modules\typescript\lib
-$env:TS_LIB = "C:\path\to\node_modules\typescript\lib"
+# PowerShell
+$env:TS_LIB = "<path>/node_modules/typescript/lib"
 
-node tsserver-probe.js . node_modules "@my-event=\"handler\"" handler
-node tsserver-probe.js . node_modules "@click=\"handler\"" handler
-node tsserver-probe.js . node_modules "{{ count }}" count
+node tsserver-probe.js . node_modules 'this.$refs.child' '$refs'
+node tsserver-probe.js . node_modules 'this.$refs.child.focusIt' focusIt
+node experiments/refs-dts-merge.js
+
+# 纯 TypeScript 反证
+node tsserver-probe.js experiments/tsexp node_modules "f.bar.child" child experiments/tsexp/use.ts
 ```
+
+## 9. 历史 / History
+
+本仓库最初用于复现另一个问题（已修复，见 commit `fba804f`）：
+**组件 import 省略 `.vue` 后缀**会导致组件变 `any`，进而整个 `this` 降级为 `any`，
+模板里所有 `@event` 都失去跳转。修法是补上 `.vue` 后缀。
+
+This repository was originally a repro for another (now fixed) issue: importing a
+component **without the `.vue` extension** makes the component `any`, which
+degrades the whole `this` type, and every `@event` handler in the template stops
+navigating. Fix: add the `.vue` extension.
 
 ---
 
-I really like OpenIDEA — it is fast and the IntelliJ-keymap feels like home.
+I really like OpenIDEA — it is fast and the IntelliJ keymap feels like home.

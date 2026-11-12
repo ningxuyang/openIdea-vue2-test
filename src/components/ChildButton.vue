@@ -3,11 +3,13 @@
 </template>
 
 <script>
-import Missing from './not-exist-module'
-
 export default {
   name: 'ChildButton',
-  components: { Missing },
-  emits: ['my-event']
+  emits: ['my-event'],
+  methods: {
+    focusIt() {
+      this.$el.focus()
+    }
+  }
 }
 </script>
